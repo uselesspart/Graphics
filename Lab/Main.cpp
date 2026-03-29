@@ -5,18 +5,17 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
-constexpr int MAX_STRING_LENGTH = 100;
+constexpr int MAX_STR_LEN = 100;
 
-// Глобальные данные приложения
-WCHAR g_AppTitle[MAX_STRING_LENGTH] = L"Lab1 DirectX11";
-WCHAR g_WindowClassName[MAX_STRING_LENGTH] = L"Lab1WindowClass";
+WCHAR g_title[MAX_STR_LEN] = L"Lab1 DirectX11";
+WCHAR g_wndClass[MAX_STR_LEN] = L"Lab1WindowClass";
 
-Render* g_pGraphics = nullptr;
+Render* g_renderer = nullptr;
 
-// Объявления функций
-ATOM RegisterAppWindow(HINSTANCE hInst);
-BOOL CreateAppWindow(HINSTANCE hInst, int showCmd);
-LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+// Прототипы
+ATOM RegisterWindowClass(HINSTANCE hInst);
+BOOL InitializeWindow(HINSTANCE hInst, int showCmd);
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -26,114 +25,110 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    RegisterAppWindow(hInstance);
-    CreateAppWindow(hInstance, nCmdShow);
+    RegisterWindowClass(hInstance);
+    InitializeWindow(hInstance, nCmdShow);
 
-    // Главный цикл обработки сообщений
-    MSG message = {};
-    while (message.message != WM_QUIT)
+    // Цикл сообщений с рендером в idle
+    MSG msg = {};
+    while (msg.message != WM_QUIT)
     {
-        if (PeekMessage(&message, nullptr, 0, 0, PM_REMOVE))
+        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
         {
-            TranslateMessage(&message);
-            DispatchMessage(&message);
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
         }
         else
         {
-            // Рендеринг сцены
-            if (g_pGraphics)
-            {
-                g_pGraphics->DrawScene();
-            }
+            if (g_renderer)
+                g_renderer->RenderFrame();
         }
     }
 
-    // Освобождение ресурсов
-    if (g_pGraphics)
+    // Корректное завершение
+    if (g_renderer)
     {
-        g_pGraphics->Shutdown();
-        delete g_pGraphics;
-        g_pGraphics = nullptr;
+        g_renderer->Shutdown();
+        delete g_renderer;
+        g_renderer = nullptr;
     }
 
-    return static_cast<int>(message.wParam);
+    return static_cast<int>(msg.wParam);
 }
 
-ATOM RegisterAppWindow(HINSTANCE hInst)
+ATOM RegisterWindowClass(HINSTANCE hInst)
 {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEX);
     wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProcedure;
+    wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInst;
     wc.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_LAB1));
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = g_WindowClassName;
+    wc.lpszClassName = g_wndClass;
     wc.hIconSm = LoadIcon(wc.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
     return RegisterClassExW(&wc);
 }
 
-BOOL CreateAppWindow(HINSTANCE hInst, int showCmd)
+BOOL InitializeWindow(HINSTANCE hInst, int showCmd)
 {
-    HWND hwnd = CreateWindowW(g_WindowClassName, g_AppTitle, WS_OVERLAPPEDWINDOW,
+    HWND hWnd = CreateWindowW(g_wndClass, g_title, WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, 0, 800, 600,
         nullptr, nullptr, hInst, nullptr);
 
-    if (!hwnd)
+    if (!hWnd)
         return FALSE;
 
-    // Инициализация графического движка
-    g_pGraphics = new Render();
-    g_pGraphics->Initialize(hwnd);
+    g_renderer = new Render();
+    g_renderer->Initialize(hWnd);
 
-    ShowWindow(hwnd, showCmd);
-    UpdateWindow(hwnd);
+    ShowWindow(hWnd, showCmd);
+    UpdateWindow(hWnd);
 
     return TRUE;
 }
 
-LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
     case WM_KEYDOWN:
-        if (g_pGraphics)
+        if (g_renderer)
         {
-            switch (wp)
+            switch (wParam)
             {
             case 'W':
-                g_pGraphics->RotateView(0.0f, 0.02f);
+                g_renderer->RotateCamera(0.0f, 0.02f);
                 break;
             case 'S':
-                g_pGraphics->RotateView(0.0f, -0.02f);
+                g_renderer->RotateCamera(0.0f, -0.02f);
                 break;
             case 'A':
-                g_pGraphics->RotateView(-0.02f, 0.0f);
+                g_renderer->RotateCamera(-0.02f, 0.0f);
                 break;
             case 'D':
-                g_pGraphics->RotateView(0.02f, 0.0f);
+                g_renderer->RotateCamera(0.02f, 0.0f);
                 break;
             case VK_UP:
-                g_pGraphics->MoveView(0.0f, 0.1f, 0.0f);
+                g_renderer->MoveCamera(0.0f, 0.1f, 0.0f);
                 break;
             case VK_DOWN:
-                g_pGraphics->MoveView(0.0f, -0.1f, 0.0f);
+                g_renderer->MoveCamera(0.0f, -0.1f, 0.0f);
                 break;
             case VK_LEFT:
-                g_pGraphics->MoveView(-0.1f, 0.0f, 0.0f);
+                g_renderer->MoveCamera(-0.1f, 0.0f, 0.0f);
                 break;
             case VK_RIGHT:
-                g_pGraphics->MoveView(0.1f, 0.0f, 0.0f);
+                g_renderer->MoveCamera(0.1f, 0.0f, 0.0f);
                 break;
             case VK_ADD:
             case 0xBB:
-                g_pGraphics->MoveView(0.0f, 0.0f, 0.1f);
+                g_renderer->MoveCamera(0.0f, 0.0f, 0.1f);
                 break;
             case VK_SUBTRACT:
             case 0xBD:
-                g_pGraphics->MoveView(0.0f, 0.0f, -0.1f);
+                g_renderer->MoveCamera(0.0f, 0.0f, -0.1f);
                 break;
             }
         }
@@ -144,7 +139,7 @@ LRESULT CALLBACK WndProcedure(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     default:
-        return DefWindowProc(hwnd, msg, wp, lp);
+        return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
 }

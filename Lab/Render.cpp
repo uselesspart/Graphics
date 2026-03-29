@@ -7,30 +7,31 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
-// Структура вершины
-struct Vertex
+// Формат одной вершины куба
+struct CubeVertex
 {
-    float pos[3];
-    COLORREF color;
+    float x, y, z;
+    COLORREF rgba;
 };
 
-// Буферы констант
-struct WorldMatrixBuffer
+// Содержимое CB для мировой матрицы
+struct CBWorld
 {
-    XMMATRIX world;
+    XMMATRIX worldMatrix;
 };
 
-struct ViewProjBuffer
+// Содержимое CB для матрицы камеры
+struct CBViewProjection
 {
-    XMMATRIX viewProj;
+    XMMATRIX vpMatrix;
 };
 
 Render::Render()
-    : m_cameraPos(0.0f, 0.0f, -5.0f)
-    , m_yawAngle(0.0f)
-    , m_pitchAngle(0.0f)
-    , m_rotationAngle(0.0f)
-    , m_hwnd(nullptr)
+    : m_camPosition(0.0f, 0.0f, -5.0f)
+    , m_camYaw(0.0f)
+    , m_camPitch(0.0f)
+    , m_cubeAngle(0.0f)
+    , m_hWnd(nullptr)
 {
 }
 
@@ -39,154 +40,152 @@ Render::~Render()
     Shutdown();
 }
 
-HRESULT Render::Initialize(HWND hwnd)
+HRESULT Render::Initialize(HWND hWnd)
 {
-    m_hwnd = hwnd;
+    m_hWnd = hWnd;
 
-    SetupDevice(hwnd);
+    InitDeviceAndSwapChain(hWnd);
 
-    RECT rect;
-    GetClientRect(hwnd, &rect);
-    UINT width = rect.right - rect.left;
-    UINT height = rect.bottom - rect.top;
+    RECT clientArea;
+    GetClientRect(hWnd, &clientArea);
+    UINT w = clientArea.right - clientArea.left;
+    UINT h = clientArea.bottom - clientArea.top;
 
-    SetupDepthStencil(width, height);
-    CreateGeometry();
-    LoadShaders();
+    CreateDepthBuffer(w, h);
+    InitGeometryBuffers();
+    CompileAndCreateShaders();
 
     return S_OK;
 }
 
 void Render::Shutdown()
 {
-    if (m_context)
-    {
-        m_context->ClearState();
-    }
+    if (m_deviceCtx)
+        m_deviceCtx->ClearState();
 }
 
-HRESULT Render::SetupDevice(HWND hwnd)
+HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
 {
-    // Поиск адаптера
-    ComPtr<IDXGIFactory> factory;
-    CreateDXGIFactory(__uuidof(IDXGIFactory), &factory);
+    // Получаем DXGI-фабрику для перечисления адаптеров
+    ComPtr<IDXGIFactory> dxgiFactory;
+    CreateDXGIFactory(__uuidof(IDXGIFactory), &dxgiFactory);
 
-    ComPtr<IDXGIAdapter> adapter;
-    UINT adapterIdx = 0;
-    while (SUCCEEDED(factory->EnumAdapters(adapterIdx, &adapter)))
+    // Ищем первый аппаратный адаптер (пропускаем программный рендерер)
+    ComPtr<IDXGIAdapter> selectedAdapter;
+    UINT idx = 0;
+    while (SUCCEEDED(dxgiFactory->EnumAdapters(idx, &selectedAdapter)))
     {
-        DXGI_ADAPTER_DESC desc;
-        adapter->GetDesc(&desc);
+        DXGI_ADAPTER_DESC adapterInfo;
+        selectedAdapter->GetDesc(&adapterInfo);
 
-        // Пропускаем программный рендерер
-        if (wcscmp(desc.Description, L"Microsoft Basic Render Driver") != 0)
-        {
+        if (wcscmp(adapterInfo.Description, L"Microsoft Basic Render Driver") != 0)
             break;
-        }
-        adapter.Reset();
-        ++adapterIdx;
+
+        selectedAdapter.Reset();
+        ++idx;
     }
 
     // Создание устройства
-    D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
-    D3D_FEATURE_LEVEL featureLevel;
+    D3D_FEATURE_LEVEL requestedLevel[] = { D3D_FEATURE_LEVEL_11_0 };
+    D3D_FEATURE_LEVEL obtainedLevel;
 
     D3D11CreateDevice(
-        adapter.Get(),
+        selectedAdapter.Get(),
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
         0,
-        featureLevels,
+        requestedLevel,
         1,
         D3D11_SDK_VERSION,
-        &m_device,
-        &featureLevel,
-        &m_context
+        &m_d3dDevice,
+        &obtainedLevel,
+        &m_deviceCtx
     );
 
-    // Настройка swap chain
-    DXGI_SWAP_CHAIN_DESC scDesc = {};
-    scDesc.BufferCount = 2;
-    scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scDesc.OutputWindow = hwnd;
-    scDesc.SampleDesc.Count = 1;
-    scDesc.SampleDesc.Quality = 0;
-    scDesc.Windowed = TRUE;
-    scDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    // Описание swap chain
+    DXGI_SWAP_CHAIN_DESC swapDesc = {};
+    swapDesc.BufferCount = 2;
+    swapDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapDesc.OutputWindow = hWnd;
+    swapDesc.SampleDesc.Count = 1;
+    swapDesc.SampleDesc.Quality = 0;
+    swapDesc.Windowed = TRUE;
+    swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    factory->CreateSwapChain(m_device.Get(), &scDesc, &m_swapChain);
+    dxgiFactory->CreateSwapChain(m_d3dDevice.Get(), &swapDesc, &m_pSwapChain);
 
-    SetupBackBuffer();
-
-    return S_OK;
-}
-
-HRESULT Render::SetupBackBuffer()
-{
-    ComPtr<ID3D11Texture2D> backBuffer;
-    m_swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), &backBuffer);
-    m_device->CreateRenderTargetView(backBuffer.Get(), nullptr, &m_renderTarget);
+    CreateBackBufferRTV();
 
     return S_OK;
 }
 
-HRESULT Render::SetupDepthStencil(UINT width, UINT height)
+HRESULT Render::CreateBackBufferRTV()
 {
-    // Создание текстуры для depth buffer
-    D3D11_TEXTURE2D_DESC depthDesc = {};
-    depthDesc.Width = width;
-    depthDesc.Height = height;
-    depthDesc.MipLevels = 1;
-    depthDesc.ArraySize = 1;
-    depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    depthDesc.SampleDesc.Count = 1;
-    depthDesc.SampleDesc.Quality = 0;
-    depthDesc.Usage = D3D11_USAGE_DEFAULT;
-    depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> backBuf;
+    m_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), &backBuf);
+    m_d3dDevice->CreateRenderTargetView(backBuf.Get(), nullptr, &m_backBufferRTV);
 
-    m_device->CreateTexture2D(&depthDesc, nullptr, &m_depthBuffer);
+    return S_OK;
+}
 
-    // Создание depth stencil view
+HRESULT Render::CreateDepthBuffer(UINT width, UINT height)
+{
+    // Текстура глубины
+    D3D11_TEXTURE2D_DESC texDesc = {};
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+
+    m_d3dDevice->CreateTexture2D(&texDesc, nullptr, &m_depthTex);
+
+    // Depth Stencil View
     D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
-    dsvDesc.Format = depthDesc.Format;
+    dsvDesc.Format = texDesc.Format;
     dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     dsvDesc.Texture2D.MipSlice = 0;
 
-    m_device->CreateDepthStencilView(m_depthBuffer.Get(), &dsvDesc, &m_depthStencil);
+    m_d3dDevice->CreateDepthStencilView(m_depthTex.Get(), &dsvDesc, &m_depthDSV);
 
-    m_context->OMSetRenderTargets(1, m_renderTarget.GetAddressOf(), m_depthStencil.Get());
+    // Привязка render target + depth
+    m_deviceCtx->OMSetRenderTargets(1, m_backBufferRTV.GetAddressOf(), m_depthDSV.Get());
 
-    // Viewport
-    D3D11_VIEWPORT vp = {};
-    vp.Width = static_cast<float>(width);
-    vp.Height = static_cast<float>(height);
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    vp.TopLeftX = 0;
-    vp.TopLeftY = 0;
-    m_context->RSSetViewports(1, &vp);
+    // Настройка области вывода
+    D3D11_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(width);
+    viewport.Height = static_cast<float>(height);
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    m_deviceCtx->RSSetViewports(1, &viewport);
 
     return S_OK;
 }
 
-HRESULT Render::CreateGeometry()
+HRESULT Render::InitGeometryBuffers()
 {
-    // Вершины куба
-    static const Vertex cubeVertices[] =
+    // 8 вершин куба с разными цветами
+    static const CubeVertex vertices[] =
     {
-        { {-1.0f,  1.0f, -1.0f}, RGB(255, 20, 147) },
-        { { 1.0f,  1.0f, -1.0f}, RGB(0, 255, 127) },
-        { { 1.0f,  1.0f,  1.0f}, RGB(138, 43, 226) },
-        { {-1.0f,  1.0f,  1.0f}, RGB(255, 215, 0) },
-        { {-1.0f, -1.0f, -1.0f}, RGB(255, 69, 0) },
-        { { 1.0f, -1.0f, -1.0f}, RGB(0, 255, 255) },
-        { { 1.0f, -1.0f,  1.0f}, RGB(186, 85, 211) },
-        { {-1.0f, -1.0f,  1.0f}, RGB(50, 205, 50) }
+        { -1.0f,  1.0f, -1.0f, RGB(255, 20, 147) },
+        {  1.0f,  1.0f, -1.0f, RGB(0, 255, 127) },
+        {  1.0f,  1.0f,  1.0f, RGB(138, 43, 226) },
+        { -1.0f,  1.0f,  1.0f, RGB(255, 215, 0) },
+        { -1.0f, -1.0f, -1.0f, RGB(255, 69, 0) },
+        {  1.0f, -1.0f, -1.0f, RGB(0, 255, 255) },
+        {  1.0f, -1.0f,  1.0f, RGB(186, 85, 211) },
+        { -1.0f, -1.0f,  1.0f, RGB(50, 205, 50) }
     };
 
-    // Индексы треугольников
-    WORD cubeIndices[] =
+    // 36 индексов — 12 треугольников на 6 граней
+    WORD indices[] =
     {
         3,1,0, 2,1,3,
         0,5,4, 1,5,0,
@@ -196,51 +195,51 @@ HRESULT Render::CreateGeometry()
         6,4,5, 7,4,6,
     };
 
-    // Создание вершинного буфера
+    // Vertex buffer
     D3D11_BUFFER_DESC vbDesc = {};
-    vbDesc.ByteWidth = sizeof(cubeVertices);
+    vbDesc.ByteWidth = sizeof(vertices);
     vbDesc.Usage = D3D11_USAGE_DEFAULT;
     vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
-    D3D11_SUBRESOURCE_DATA vbData = {};
-    vbData.pSysMem = cubeVertices;
+    D3D11_SUBRESOURCE_DATA vbInit = {};
+    vbInit.pSysMem = vertices;
 
-    m_device->CreateBuffer(&vbDesc, &vbData, &m_vertexBuffer);
+    m_d3dDevice->CreateBuffer(&vbDesc, &vbInit, &m_cubeVB);
 
-    // Создание индексного буфера
+    // Index buffer
     D3D11_BUFFER_DESC ibDesc = {};
-    ibDesc.ByteWidth = sizeof(cubeIndices);
+    ibDesc.ByteWidth = sizeof(indices);
     ibDesc.Usage = D3D11_USAGE_DEFAULT;
     ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
 
-    D3D11_SUBRESOURCE_DATA ibData = {};
-    ibData.pSysMem = cubeIndices;
+    D3D11_SUBRESOURCE_DATA ibInit = {};
+    ibInit.pSysMem = indices;
 
-    m_device->CreateBuffer(&ibDesc, &ibData, &m_indexBuffer);
+    m_d3dDevice->CreateBuffer(&ibDesc, &ibInit, &m_cubeIB);
 
-    // Константный буфер для world матрицы
+    // CB для мировой матрицы (обновляется через UpdateSubresource)
     D3D11_BUFFER_DESC cbDesc = {};
-    cbDesc.ByteWidth = sizeof(WorldMatrixBuffer);
+    cbDesc.ByteWidth = sizeof(CBWorld);
     cbDesc.Usage = D3D11_USAGE_DEFAULT;
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-    m_device->CreateBuffer(&cbDesc, nullptr, &m_worldBuffer);
+    m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbWorld);
 
-    // Константный буфер для view-projection
-    cbDesc.ByteWidth = sizeof(ViewProjBuffer);
+    // CB для view-projection (обновляется через Map/Unmap)
+    cbDesc.ByteWidth = sizeof(CBViewProjection);
     cbDesc.Usage = D3D11_USAGE_DYNAMIC;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-    m_device->CreateBuffer(&cbDesc, nullptr, &m_viewProjBuffer);
+    m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbViewProj);
 
     return S_OK;
 }
 
-HRESULT Render::LoadShaders()
+HRESULT Render::CompileAndCreateShaders()
 {
     // Компиляция вершинного шейдера
-    ComPtr<ID3DBlob> vsBlob;
-    ComPtr<ID3DBlob> errorBlob;
+    ComPtr<ID3DBlob> vsCode;
+    ComPtr<ID3DBlob> compileErrors;
 
     D3DCompileFromFile(
         L"VertexShader.vs",
@@ -250,19 +249,19 @@ HRESULT Render::LoadShaders()
         "vs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS,
         0,
-        &vsBlob,
-        &errorBlob
+        &vsCode,
+        &compileErrors
     );
 
-    m_device->CreateVertexShader(
-        vsBlob->GetBufferPointer(),
-        vsBlob->GetBufferSize(),
+    m_d3dDevice->CreateVertexShader(
+        vsCode->GetBufferPointer(),
+        vsCode->GetBufferSize(),
         nullptr,
-        &m_vertexShader
+        &m_mainVS
     );
 
     // Компиляция пиксельного шейдера
-    ComPtr<ID3DBlob> psBlob;
+    ComPtr<ID3DBlob> psCode;
     D3DCompileFromFile(
         L"PixelShader.ps",
         nullptr,
@@ -271,127 +270,120 @@ HRESULT Render::LoadShaders()
         "ps_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS,
         0,
-        &psBlob,
-        &errorBlob
+        &psCode,
+        &compileErrors
     );
 
-    m_device->CreatePixelShader(
-        psBlob->GetBufferPointer(),
-        psBlob->GetBufferSize(),
+    m_d3dDevice->CreatePixelShader(
+        psCode->GetBufferPointer(),
+        psCode->GetBufferSize(),
         nullptr,
-        &m_pixelShader
+        &m_mainPS
     );
 
-    // Input layout
-    D3D11_INPUT_ELEMENT_DESC layout[] =
+    // Input Layout
+    D3D11_INPUT_ELEMENT_DESC inputDesc[] =
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
     };
 
-    m_device->CreateInputLayout(
-        layout,
+    m_d3dDevice->CreateInputLayout(
+        inputDesc,
         2,
-        vsBlob->GetBufferPointer(),
-        vsBlob->GetBufferSize(),
-        &m_inputLayout
+        vsCode->GetBufferPointer(),
+        vsCode->GetBufferSize(),
+        &m_vertexLayout
     );
 
     return S_OK;
 }
 
-void Render::DrawScene()
+void Render::RenderFrame()
 {
-    // Очистка буферов (темно-фиолетовый космический фон)
-    float clearColor[4] = { 0.1f, 0.05f, 0.2f, 1.0f };
-    m_context->ClearRenderTargetView(m_renderTarget.Get(), clearColor);
-    m_context->ClearDepthStencilView(m_depthStencil.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    // Заливка фона
+    float bgColor[4] = { 0.1f, 0.05f, 0.2f, 1.0f };
+    m_deviceCtx->ClearRenderTargetView(m_backBufferRTV.Get(), bgColor);
+    m_deviceCtx->ClearDepthStencilView(m_depthDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
-    UpdateTransforms();
+    UpdateMatrices();
 
-    // Настройка pipeline
-    UINT stride = sizeof(Vertex);
-    UINT offset = 0;
-    m_context->IASetVertexBuffers(0, 1, m_vertexBuffer.GetAddressOf(), &stride, &offset);
-    m_context->IASetIndexBuffer(m_indexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
-    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    m_context->IASetInputLayout(m_inputLayout.Get());
+    // Сборка графического конвейера
+    UINT vertexStride = sizeof(CubeVertex);
+    UINT vertexOffset = 0;
+    m_deviceCtx->IASetVertexBuffers(0, 1, m_cubeVB.GetAddressOf(), &vertexStride, &vertexOffset);
+    m_deviceCtx->IASetIndexBuffer(m_cubeIB.Get(), DXGI_FORMAT_R16_UINT, 0);
+    m_deviceCtx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_deviceCtx->IASetInputLayout(m_vertexLayout.Get());
 
-    m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
-    m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
+    m_deviceCtx->VSSetShader(m_mainVS.Get(), nullptr, 0);
+    m_deviceCtx->PSSetShader(m_mainPS.Get(), nullptr, 0);
 
-    // Рендеринг
-    m_context->DrawIndexed(36, 0, 0);
+    // Отрисовка куба
+    m_deviceCtx->DrawIndexed(36, 0, 0);
 
-    m_swapChain->Present(1, 0);
+    m_pSwapChain->Present(1, 0);
 }
 
-void Render::UpdateTransforms()
+void Render::UpdateMatrices()
 {
-    // Обновление угла вращения куба
-    m_rotationAngle += 0.005f;
-    if (m_rotationAngle > XM_2PI)
-        m_rotationAngle -= XM_2PI;
+    // Вращение куба вокруг оси Y
+    m_cubeAngle += 0.005f;
+    if (m_cubeAngle > XM_2PI)
+        m_cubeAngle -= XM_2PI;
 
-    XMMATRIX world = XMMatrixRotationY(m_rotationAngle);
+    XMMATRIX worldMtx = XMMatrixRotationY(m_cubeAngle);
+    XMMATRIX worldT = XMMatrixTranspose(worldMtx);
+    m_deviceCtx->UpdateSubresource(m_cbWorld.Get(), 0, nullptr, &worldT, 0, 0);
 
-    // Обновление матрицы мира
-    XMMATRIX worldTranspose = XMMatrixTranspose(world);
-    m_context->UpdateSubresource(m_worldBuffer.Get(), 0, nullptr, &worldTranspose, 0, 0);
-
-    // Вычисление направления взгляда
-    XMVECTOR direction = XMVectorSet(
-        cosf(m_pitchAngle) * sinf(m_yawAngle),
-        sinf(m_pitchAngle),
-        cosf(m_pitchAngle) * cosf(m_yawAngle),
+    // Направление взгляда камеры из углов yaw/pitch
+    XMVECTOR lookDir = XMVectorSet(
+        cosf(m_camPitch) * sinf(m_camYaw),
+        sinf(m_camPitch),
+        cosf(m_camPitch) * cosf(m_camYaw),
         0.0f
     );
 
-    XMVECTOR eye = XMLoadFloat3(&m_cameraPos);
-    XMVECTOR focus = XMVectorAdd(eye, direction);
-    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMVECTOR eyePos = XMLoadFloat3(&m_camPosition);
+    XMVECTOR target = XMVectorAdd(eyePos, lookDir);
+    XMVECTOR upDir = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
 
-    XMMATRIX view = XMMatrixLookAtLH(eye, focus, up);
+    XMMATRIX viewMtx = XMMatrixLookAtLH(eyePos, target, upDir);
 
     // Перспективная проекция
-    RECT rect;
-    GetClientRect(m_hwnd, &rect);
-    float aspect = static_cast<float>(rect.right - rect.left) / static_cast<float>(rect.bottom - rect.top);
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspect, 0.1f, 100.0f);
+    RECT rc;
+    GetClientRect(m_hWnd, &rc);
+    float aspectRatio = static_cast<float>(rc.right - rc.left) / static_cast<float>(rc.bottom - rc.top);
+    XMMATRIX projMtx = XMMatrixPerspectiveFovLH(XM_PIDIV4, aspectRatio, 0.1f, 100.0f);
 
-    XMMATRIX viewProj = view * proj;
-    XMMATRIX vpTranspose = XMMatrixTranspose(viewProj);
+    XMMATRIX vpMtx = viewMtx * projMtx;
+    XMMATRIX vpT = XMMatrixTranspose(vpMtx);
 
-    // Обновление view-projection буфера
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    m_context->Map(m_viewProjBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-    memcpy(mapped.pData, &vpTranspose, sizeof(XMMATRIX));
-    m_context->Unmap(m_viewProjBuffer.Get(), 0);
+    // Запись view-projection через Map/Unmap
+    D3D11_MAPPED_SUBRESOURCE mapData;
+    m_deviceCtx->Map(m_cbViewProj.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapData);
+    memcpy(mapData.pData, &vpT, sizeof(XMMATRIX));
+    m_deviceCtx->Unmap(m_cbViewProj.Get(), 0);
 
-    m_context->VSSetConstantBuffers(0, 1, m_worldBuffer.GetAddressOf());
-    m_context->VSSetConstantBuffers(1, 1, m_viewProjBuffer.GetAddressOf());
+    m_deviceCtx->VSSetConstantBuffers(0, 1, m_cbWorld.GetAddressOf());
+    m_deviceCtx->VSSetConstantBuffers(1, 1, m_cbViewProj.GetAddressOf());
 }
 
-void Render::MoveView(float dx, float dy, float dz)
+void Render::MoveCamera(float dx, float dy, float dz)
 {
-    m_cameraPos.x += dx;
-    m_cameraPos.y += dy;
-    m_cameraPos.z += dz;
+    m_camPosition.x += dx;
+    m_camPosition.y += dy;
+    m_camPosition.z += dz;
 }
 
-void Render::RotateView(float yaw, float pitch)
+void Render::RotateCamera(float deltaYaw, float deltaPitch)
 {
-    m_yawAngle += yaw;
-    m_pitchAngle += pitch;
+    m_camYaw += deltaYaw;
+    m_camPitch += deltaPitch;
 
-    // Ограничение углов
-    if (m_yawAngle > XM_2PI)
-        m_yawAngle -= XM_2PI;
-    if (m_yawAngle < -XM_2PI)
-        m_yawAngle += XM_2PI;
+    if (m_camYaw > XM_2PI)   m_camYaw -= XM_2PI;
+    if (m_camYaw < -XM_2PI)  m_camYaw += XM_2PI;
 
-    if (m_pitchAngle > XM_PIDIV2)
-        m_pitchAngle = XM_PIDIV2;
-    if (m_pitchAngle < -XM_PIDIV2)
-        m_pitchAngle = -XM_PIDIV2;
+    if (m_camPitch > XM_PIDIV2)  m_camPitch = XM_PIDIV2;
+    if (m_camPitch < -XM_PIDIV2) m_camPitch = -XM_PIDIV2;
 }

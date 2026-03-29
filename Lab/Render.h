@@ -3,7 +3,6 @@
 #include <d3d11.h>
 #include <DirectXMath.h>
 #include <wrl/client.h>
-#include <string>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -14,48 +13,52 @@ public:
     Render();
     ~Render();
 
-    HRESULT Initialize(HWND hwnd);
+    HRESULT Initialize(HWND hWnd);
     void Shutdown();
-    void DrawScene();
+    void RenderFrame();
 
     // Управление камерой
-    void MoveView(float dx, float dy, float dz);
-    void RotateView(float yaw, float pitch);
+    void MoveCamera(float dx, float dy, float dz);
+    void RotateCamera(float deltaYaw, float deltaPitch);
 
 private:
-    HRESULT SetupDevice(HWND hwnd);
-    HRESULT SetupBackBuffer();
-    HRESULT SetupDepthStencil(UINT width, UINT height);
-    HRESULT CreateGeometry();
-    HRESULT LoadShaders();
-    void UpdateTransforms();
+    HRESULT InitDeviceAndSwapChain(HWND hWnd);
+    HRESULT CreateBackBufferRTV();
+    HRESULT CreateDepthBuffer(UINT width, UINT height);
+    HRESULT InitGeometryBuffers();
+    HRESULT CompileAndCreateShaders();
+    void UpdateMatrices();
 
-    // D3D11 объекты
-    ComPtr<ID3D11Device> m_device;
-    ComPtr<ID3D11DeviceContext> m_context;
-    ComPtr<IDXGISwapChain> m_swapChain;
-    ComPtr<ID3D11RenderTargetView> m_renderTarget;
-    ComPtr<ID3D11DepthStencilView> m_depthStencil;
-    ComPtr<ID3D11Texture2D> m_depthBuffer;
+    // Устройство и контекст
+    ComPtr<ID3D11Device>           m_d3dDevice;
+    ComPtr<ID3D11DeviceContext>    m_deviceCtx;
+    ComPtr<IDXGISwapChain>         m_pSwapChain;
 
-    // Геометрия
-    ComPtr<ID3D11Buffer> m_vertexBuffer;
-    ComPtr<ID3D11Buffer> m_indexBuffer;
+    // Render targets и глубина
+    ComPtr<ID3D11RenderTargetView> m_backBufferRTV;
+    ComPtr<ID3D11Texture2D>        m_depthTex;
+    ComPtr<ID3D11DepthStencilView> m_depthDSV;
 
-    // Шейдеры
-    ComPtr<ID3D11VertexShader> m_vertexShader;
-    ComPtr<ID3D11PixelShader> m_pixelShader;
-    ComPtr<ID3D11InputLayout> m_inputLayout;
+    // Геометрия куба
+    ComPtr<ID3D11Buffer> m_cubeVB;
+    ComPtr<ID3D11Buffer> m_cubeIB;
+
+    // Шейдеры и layout
+    ComPtr<ID3D11VertexShader> m_mainVS;
+    ComPtr<ID3D11PixelShader>  m_mainPS;
+    ComPtr<ID3D11InputLayout>  m_vertexLayout;
 
     // Константные буферы
-    ComPtr<ID3D11Buffer> m_worldBuffer;
-    ComPtr<ID3D11Buffer> m_viewProjBuffer;
+    ComPtr<ID3D11Buffer> m_cbWorld;
+    ComPtr<ID3D11Buffer> m_cbViewProj;
 
-    // Параметры камеры
-    XMFLOAT3 m_cameraPos;
-    float m_yawAngle;
-    float m_pitchAngle;
-    float m_rotationAngle;
+    // Камера
+    XMFLOAT3 m_camPosition;
+    float    m_camYaw;
+    float    m_camPitch;
 
-    HWND m_hwnd;
+    // Анимация куба
+    float m_cubeAngle;
+
+    HWND m_hWnd;
 };
