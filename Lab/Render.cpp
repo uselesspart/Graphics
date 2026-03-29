@@ -6,6 +6,7 @@
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxguid.lib")
 
 // Формат одной вершины куба
 struct CubeVertex
@@ -26,6 +27,14 @@ struct CBViewProjection
     XMMATRIX vpMatrix;
 };
 
+// Утилита: присваивает D3D-объекту отладочное имя (видно в RenderDoc и D3D debug output)
+template<typename T>
+inline void SetObjectLabel(ComPtr<T>& obj, const char* label)
+{
+    if (obj)
+        obj->SetPrivateData(WKPDID_D3DDebugObjectName, static_cast<UINT>(strlen(label)), label);
+}
+
 Render::Render()
     : m_camPosition(0.0f, 0.0f, -5.0f)
     , m_camYaw(0.0f)
@@ -44,16 +53,40 @@ HRESULT Render::Initialize(HWND hWnd)
 {
     m_hWnd = hWnd;
 
-    InitDeviceAndSwapChain(hWnd);
+    HRESULT hr = InitDeviceAndSwapChain(hWnd);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось инициализировать устройство D3D11\n");
+        return hr;
+    }
 
     RECT clientArea;
     GetClientRect(hWnd, &clientArea);
     UINT w = clientArea.right - clientArea.left;
     UINT h = clientArea.bottom - clientArea.top;
 
-    CreateDepthBuffer(w, h);
-    InitGeometryBuffers();
-    CompileAndCreateShaders();
+    hr = CreateDepthBuffer(w, h);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать буфер глубины\n");
+        return hr;
+    }
+
+    hr = InitGeometryBuffers();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать геометрические буферы\n");
+        return hr;
+    }
+
+    hr = CompileAndCreateShaders();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось скомпилировать шейдеры\n");
+        return hr;
+    }
+
+    LabelD3DResources();
 
     return S_OK;
 }
@@ -68,7 +101,12 @@ HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
 {
     // Получаем DXGI-фабрику для перечисления адаптеров
     ComPtr<IDXGIFactory> dxgiFactory;
-    CreateDXGIFactory(__uuidof(IDXGIFactory), &dxgiFactory);
+    HRESULT hr = CreateDXGIFactory(__uuidof(IDXGIFactory), &dxgiFactory);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreateDXGIFactory не удался\n");
+        return hr;
+    }
 
     // Ищем первый аппаратный адаптер (пропускаем программный рендерер)
     ComPtr<IDXGIAdapter> selectedAdapter;
@@ -85,15 +123,20 @@ HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
         ++idx;
     }
 
-    // Создание устройства
+    // В Debug-конфигурации включаем отладочный слой D3D11
+    UINT deviceFlags = 0;
+#if defined(_DEBUG)
+    deviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
     D3D_FEATURE_LEVEL requestedLevel[] = { D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL obtainedLevel;
 
-    D3D11CreateDevice(
+    hr = D3D11CreateDevice(
         selectedAdapter.Get(),
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
-        0,
+        deviceFlags,
         requestedLevel,
         1,
         D3D11_SDK_VERSION,
@@ -101,6 +144,12 @@ HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
         &obtainedLevel,
         &m_deviceCtx
     );
+
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] D3D11CreateDevice не удался\n");
+        return hr;
+    }
 
     // Описание swap chain
     DXGI_SWAP_CHAIN_DESC swapDesc = {};
@@ -113,9 +162,27 @@ HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
     swapDesc.Windowed = TRUE;
     swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    dxgiFactory->CreateSwapChain(m_d3dDevice.Get(), &swapDesc, &m_pSwapChain);
+    hr = dxgiFactory->CreateSwapChain(m_d3dDevice.Get(), &swapDesc, &m_pSwapChain);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreateSwapChain не удался\n");
+        return hr;
+    }
 
-    CreateBackBufferRTV();
+    hr = CreateBackBufferRTV();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать RTV для back buffer\n");
+        return hr;
+    }
+
+    // Запрашиваем интерфейс аннотаций для пометок в RenderDoc
+    hr = m_deviceCtx->QueryInterface(__uuidof(ID3DUserDefinedAnnotation), &m_debugAnnotation);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[WARN] ID3DUserDefinedAnnotation недоступен\n");
+        m_debugAnnotation = nullptr;
+    }
 
     return S_OK;
 }
@@ -123,8 +190,19 @@ HRESULT Render::InitDeviceAndSwapChain(HWND hWnd)
 HRESULT Render::CreateBackBufferRTV()
 {
     ComPtr<ID3D11Texture2D> backBuf;
-    m_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), &backBuf);
-    m_d3dDevice->CreateRenderTargetView(backBuf.Get(), nullptr, &m_backBufferRTV);
+    HRESULT hr = m_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), &backBuf);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] GetBuffer для back buffer не удался\n");
+        return hr;
+    }
+
+    hr = m_d3dDevice->CreateRenderTargetView(backBuf.Get(), nullptr, &m_backBufferRTV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreateRenderTargetView не удался\n");
+        return hr;
+    }
 
     return S_OK;
 }
@@ -143,7 +221,12 @@ HRESULT Render::CreateDepthBuffer(UINT width, UINT height)
     texDesc.Usage = D3D11_USAGE_DEFAULT;
     texDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 
-    m_d3dDevice->CreateTexture2D(&texDesc, nullptr, &m_depthTex);
+    HRESULT hr = m_d3dDevice->CreateTexture2D(&texDesc, nullptr, &m_depthTex);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать текстуру глубины\n");
+        return hr;
+    }
 
     // Depth Stencil View
     D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
@@ -151,7 +234,12 @@ HRESULT Render::CreateDepthBuffer(UINT width, UINT height)
     dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
     dsvDesc.Texture2D.MipSlice = 0;
 
-    m_d3dDevice->CreateDepthStencilView(m_depthTex.Get(), &dsvDesc, &m_depthDSV);
+    hr = m_d3dDevice->CreateDepthStencilView(m_depthTex.Get(), &dsvDesc, &m_depthDSV);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать DSV\n");
+        return hr;
+    }
 
     // Привязка render target + depth
     m_deviceCtx->OMSetRenderTargets(1, m_backBufferRTV.GetAddressOf(), m_depthDSV.Get());
@@ -204,7 +292,12 @@ HRESULT Render::InitGeometryBuffers()
     D3D11_SUBRESOURCE_DATA vbInit = {};
     vbInit.pSysMem = vertices;
 
-    m_d3dDevice->CreateBuffer(&vbDesc, &vbInit, &m_cubeVB);
+    HRESULT hr = m_d3dDevice->CreateBuffer(&vbDesc, &vbInit, &m_cubeVB);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать vertex buffer\n");
+        return hr;
+    }
 
     // Index buffer
     D3D11_BUFFER_DESC ibDesc = {};
@@ -215,7 +308,12 @@ HRESULT Render::InitGeometryBuffers()
     D3D11_SUBRESOURCE_DATA ibInit = {};
     ibInit.pSysMem = indices;
 
-    m_d3dDevice->CreateBuffer(&ibDesc, &ibInit, &m_cubeIB);
+    hr = m_d3dDevice->CreateBuffer(&ibDesc, &ibInit, &m_cubeIB);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать index buffer\n");
+        return hr;
+    }
 
     // CB для мировой матрицы (обновляется через UpdateSubresource)
     D3D11_BUFFER_DESC cbDesc = {};
@@ -223,84 +321,150 @@ HRESULT Render::InitGeometryBuffers()
     cbDesc.Usage = D3D11_USAGE_DEFAULT;
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 
-    m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbWorld);
+    hr = m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbWorld);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать CB world\n");
+        return hr;
+    }
 
     // CB для view-projection (обновляется через Map/Unmap)
     cbDesc.ByteWidth = sizeof(CBViewProjection);
     cbDesc.Usage = D3D11_USAGE_DYNAMIC;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-    m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbViewProj);
+    hr = m_d3dDevice->CreateBuffer(&cbDesc, nullptr, &m_cbViewProj);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать CB view-projection\n");
+        return hr;
+    }
 
     return S_OK;
 }
 
 HRESULT Render::CompileAndCreateShaders()
 {
-    // Компиляция вершинного шейдера
+    // В Debug дополнительно включаем отладочную информацию в шейдерах
+    UINT shaderFlags = D3DCOMPILE_ENABLE_STRICTNESS;
+#if defined(_DEBUG)
+    shaderFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
     ComPtr<ID3DBlob> vsCode;
     ComPtr<ID3DBlob> compileErrors;
 
-    D3DCompileFromFile(
+    // --- Vertex Shader ---
+    HRESULT hr = D3DCompileFromFile(
         L"VertexShader.vs",
         nullptr,
         D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "main",
         "vs_5_0",
-        D3DCOMPILE_ENABLE_STRICTNESS,
+        shaderFlags,
         0,
         &vsCode,
         &compileErrors
     );
+    if (FAILED(hr))
+    {
+        if (compileErrors)
+            OutputDebugStringA(static_cast<const char*>(compileErrors->GetBufferPointer()));
+        OutputDebugString(L"[ERROR] Компиляция vertex shader не удалась\n");
+        return hr;
+    }
 
-    m_d3dDevice->CreateVertexShader(
+    hr = m_d3dDevice->CreateVertexShader(
         vsCode->GetBufferPointer(),
         vsCode->GetBufferSize(),
         nullptr,
         &m_mainVS
     );
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreateVertexShader не удался\n");
+        return hr;
+    }
 
-    // Компиляция пиксельного шейдера
+    // --- Pixel Shader ---
     ComPtr<ID3DBlob> psCode;
-    D3DCompileFromFile(
+    hr = D3DCompileFromFile(
         L"PixelShader.ps",
         nullptr,
         D3D_COMPILE_STANDARD_FILE_INCLUDE,
         "main",
         "ps_5_0",
-        D3DCOMPILE_ENABLE_STRICTNESS,
+        shaderFlags,
         0,
         &psCode,
         &compileErrors
     );
+    if (FAILED(hr))
+    {
+        if (compileErrors)
+            OutputDebugStringA(static_cast<const char*>(compileErrors->GetBufferPointer()));
+        OutputDebugString(L"[ERROR] Компиляция pixel shader не удалась\n");
+        return hr;
+    }
 
-    m_d3dDevice->CreatePixelShader(
+    hr = m_d3dDevice->CreatePixelShader(
         psCode->GetBufferPointer(),
         psCode->GetBufferSize(),
         nullptr,
         &m_mainPS
     );
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreatePixelShader не удался\n");
+        return hr;
+    }
 
-    // Input Layout
+    // --- Input Layout ---
     D3D11_INPUT_ELEMENT_DESC inputDesc[] =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
     };
 
-    m_d3dDevice->CreateInputLayout(
+    hr = m_d3dDevice->CreateInputLayout(
         inputDesc,
         2,
         vsCode->GetBufferPointer(),
         vsCode->GetBufferSize(),
         &m_vertexLayout
     );
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] CreateInputLayout не удался\n");
+        return hr;
+    }
 
     return S_OK;
 }
 
+void Render::LabelD3DResources()
+{
+#if defined(_DEBUG)
+    SetObjectLabel(m_d3dDevice, "D3D Device");
+    SetObjectLabel(m_deviceCtx, "Immediate Context");
+    SetObjectLabel(m_pSwapChain, "Primary SwapChain");
+    SetObjectLabel(m_backBufferRTV, "BackBuffer RTV");
+    SetObjectLabel(m_depthDSV, "Depth DSV");
+    SetObjectLabel(m_cubeVB, "Cube VB");
+    SetObjectLabel(m_cubeIB, "Cube IB");
+    SetObjectLabel(m_cbWorld, "CB World");
+    SetObjectLabel(m_cbViewProj, "CB ViewProj");
+    SetObjectLabel(m_mainVS, "Main VS");
+    SetObjectLabel(m_mainPS, "Main PS");
+#endif
+}
+
 void Render::RenderFrame()
 {
+    // Маркер начала кадра
+    if (m_debugAnnotation)
+        m_debugAnnotation->BeginEvent(L"Frame Render");
+
     // Заливка фона
     float bgColor[4] = { 0.1f, 0.05f, 0.2f, 1.0f };
     m_deviceCtx->ClearRenderTargetView(m_backBufferRTV.Get(), bgColor);
@@ -319,8 +483,20 @@ void Render::RenderFrame()
     m_deviceCtx->VSSetShader(m_mainVS.Get(), nullptr, 0);
     m_deviceCtx->PSSetShader(m_mainPS.Get(), nullptr, 0);
 
-    // Отрисовка куба
+    // Отрисовка куба с меткой
+    if (m_debugAnnotation)
+        m_debugAnnotation->BeginEvent(L"Draw Cube");
+
     m_deviceCtx->DrawIndexed(36, 0, 0);
+
+
+
+    if (m_debugAnnotation)
+        m_debugAnnotation->EndEvent();
+
+    // Конец кадра
+    if (m_debugAnnotation)
+        m_debugAnnotation->EndEvent();
 
     m_pSwapChain->Present(1, 0);
 }
@@ -361,12 +537,54 @@ void Render::UpdateMatrices()
 
     // Запись view-projection через Map/Unmap
     D3D11_MAPPED_SUBRESOURCE mapData;
-    m_deviceCtx->Map(m_cbViewProj.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapData);
-    memcpy(mapData.pData, &vpT, sizeof(XMMATRIX));
-    m_deviceCtx->Unmap(m_cbViewProj.Get(), 0);
+    HRESULT hr = m_deviceCtx->Map(m_cbViewProj.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapData);
+    if (SUCCEEDED(hr))
+    {
+        memcpy(mapData.pData, &vpT, sizeof(XMMATRIX));
+        m_deviceCtx->Unmap(m_cbViewProj.Get(), 0);
+    }
 
     m_deviceCtx->VSSetConstantBuffers(0, 1, m_cbWorld.GetAddressOf());
     m_deviceCtx->VSSetConstantBuffers(1, 1, m_cbViewProj.GetAddressOf());
+}
+
+void Render::OnWindowResize(HWND hWnd)
+{
+    if (!m_pSwapChain)
+        return;
+
+    // Отвязываем текущие render targets перед пересозданием
+    m_deviceCtx->OMSetRenderTargets(0, nullptr, nullptr);
+    m_backBufferRTV.Reset();
+    m_depthDSV.Reset();
+    m_depthTex.Reset();
+
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+    UINT newW = rc.right - rc.left;
+    UINT newH = rc.bottom - rc.top;
+
+    // Перестраиваем буферы swap chain под новый размер окна
+    HRESULT hr = m_pSwapChain->ResizeBuffers(0, newW, newH, DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] ResizeBuffers не удался\n");
+        return;
+    }
+
+    hr = CreateBackBufferRTV();
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Пересоздание RTV не удалось\n");
+        return;
+    }
+
+    hr = CreateDepthBuffer(newW, newH);
+    if (FAILED(hr))
+    {
+        OutputDebugString(L"[ERROR] Пересоздание буфера глубины не удалось\n");
+        return;
+    }
 }
 
 void Render::MoveCamera(float dx, float dy, float dz)
