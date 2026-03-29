@@ -16,6 +16,7 @@ Render* g_renderer = nullptr;
 ATOM RegisterWindowClass(HINSTANCE hInst);
 BOOL InitializeWindow(HINSTANCE hInst, int showCmd);
 LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+void HandleResizeEvent(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -25,8 +26,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    RegisterWindowClass(hInstance);
-    InitializeWindow(hInstance, nCmdShow);
+    if (!RegisterWindowClass(hInstance))
+    {
+        OutputDebugString(L"[ERROR] Не удалось зарегистрировать класс окна\n");
+        return FALSE;
+    }
+
+    if (!InitializeWindow(hInstance, nCmdShow))
+    {
+        OutputDebugString(L"[ERROR] Не удалось создать окно приложения\n");
+        return FALSE;
+    }
 
     // Цикл сообщений с рендером в idle
     MSG msg = {};
@@ -78,10 +88,19 @@ BOOL InitializeWindow(HINSTANCE hInst, int showCmd)
         nullptr, nullptr, hInst, nullptr);
 
     if (!hWnd)
+    {
+        OutputDebugString(L"[ERROR] CreateWindowW вернул NULL\n");
         return FALSE;
+    }
 
     g_renderer = new Render();
-    g_renderer->Initialize(hWnd);
+    if (FAILED(g_renderer->Initialize(hWnd)))
+    {
+        OutputDebugString(L"[ERROR] Инициализация рендера не удалась\n");
+        delete g_renderer;
+        g_renderer = nullptr;
+        return FALSE;
+    }
 
     ShowWindow(hWnd, showCmd);
     UpdateWindow(hWnd);
@@ -93,6 +112,10 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
+    case WM_SIZE:
+        HandleResizeEvent(hWnd);
+        break;
+
     case WM_KEYDOWN:
         if (g_renderer)
         {
@@ -142,4 +165,10 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return DefWindowProc(hWnd, msg, wParam, lParam);
     }
     return 0;
+}
+
+void HandleResizeEvent(HWND hWnd)
+{
+    if (g_renderer)
+        g_renderer->OnWindowResize(hWnd);
 }
